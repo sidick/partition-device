@@ -68,6 +68,20 @@ int __attribute__((no_reorder)) _start(void)
     return -1;
 }
 
+/*
+ * End of the module, defined by endskip.S and linked last, so rt_EndSkip
+ * tells Exec to resume its RomTag scan past the whole thing.
+ *
+ * virtionet-device (~/src/m68k-machine/m68k) does the simpler thing and sets
+ * rt_EndSkip to (&ROMTag + 1), i.e. just past the tag itself - no extra file
+ * and no asm/underscore coupling. That is valid, but it leaves Exec scanning
+ * the rest of the module, where a stray 0x4AFC in code or data would be
+ * misread as another RomTag. Skipping to the real end is why the convention
+ * exists, so keep it; do not "simplify" this away.
+ *
+ * Note the name: the toolchain prefixes C identifiers with an underscore, so
+ * endskip.S defines _endskip and C refers to it as endskip.
+ */
 extern const char endskip;
 
 static const APTR dev_vectors[] = {
