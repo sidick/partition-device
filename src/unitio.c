@@ -214,6 +214,162 @@ static LONG scsi_read_capacity(struct PUUnit *pu, struct SCSICmd *cmd,
 }
 
 /*
+ * Synthesise INQUIRY so the unit identifies as itself.
+ *
+ * Forwarding INQUIRY untouched made a unit report the underlying drive's
+ * vendor and product - devtest showed "COPPERLN SCSI DISK" for a partition.
+ * That is wrong in the same way the geometry mode pages were: the caller
+ * asked what THIS unit is, and a partition is not the drive it lives on.
+ * lide synthesises INQUIRY from IDENTIFY for the same reason.
+ */
+static LONG scsi_inquiry(struct PUDisk *pd, struct PUUnit *pu,
+                         struct SCSICmd *cmd, const UBYTE *cdb)
+{
+    UBYTE *d = (UBYTE *)cmd->scsi_Data;
+    ULONG  len;
+
+    if (d == NULL) {
+        return IOERR_BADADDRESS;
+    }
+    /* EVPD: we publish no vital-product-data pages. */
+    if (cdb[1] & 0x01) {
+        return IOERR_NOCMD;
+    }
+    if (cmd->scsi_Length < 36) {
+        return IOERR_BADLENGTH;
+    }
+
+    len = cmd->scsi_Length < 36 ? cmd->scsi_Length : 36;
+    memset(d, 0, len);
+
+    d[0] = 0x00;        /* direct-access block device */
+    d[1] = (UBYTE)(pd->pd_Removable ? 0x80 : 0x00);
+    d[2] = 0x02;        /* claims SCSI-2, as lide does: some software
+                         * expects 2 and refuses 0 */
+    d[3] = 0x02;        /* response data format */
+    d[4] = 36 - 5;      /* additional length */
+
+    memcpy(d + 8,  "PARTUNIT", 8);
+    memcpy(d + 16, "Partition Unit  ", 16);
+    memcpy(d + 32, "0001", 4);
+
+    cmd->scsi_Actual = len;
+    (void)pu;
+    return 0;
+}
+
+/*
+ * Synthesise MODE SENSE(6) pages 0x03 and 0x04.
+ *
+ * These were previously forwarded as "non-addressing" commands, which was a
+ * mistake: page 0x03 (Format Parameters) and page 0x04 (Rigid Drive
+ * Geometry) ARE geometry. devtest -g showed a 1024-block unit reporting 32
+ * sectors per track and 32 cylinders / 16 heads - the underlying drive's
+ * numbers, flatly contradicting what TD_GETGEOMETRY says about the same
+ * unit. A caller that believes them computes addresses for the wrong disk.
+ *
+ * Pages are reported consistently with the synthetic geometry: one head, one
+ * sector per track, cylinders = blocks, block size inherited. Only 0x03,
+ * 0x04 and 0x3F (all) are answered; any other page is refused rather than
+ * forwarded, so nothing about the child can leak through this command.
+ */
+#define MS_PAGE_LEN 24      /* page code + length + 22 bytes of payload */
+
+static UBYTE *mode_page_03(UBYTE *p, const um_unit *u)
+{
+    memset(p, 0, MS_PAGE_LEN);
+    p[0] = 0x03;
+    p[1] = MS_PAGE_LEN - 2;
+    p[10] = 0;                                  /* sectors per track, hi */
+    p[11] = 1;                                  /* ... = 1, as we report */
+    p[12] = (UBYTE)((u->block_size >> 8) & 0xFF);
+    p[13] = (UBYTE)(u->block_size & 0xFF);
+    return p + MS_PAGE_LEN;
+}
+
+static UBYTE *mode_page_04(UBYTE *p, const um_unit *u)
+{
+    /* The cylinder field is 3 bytes. Our cylinders == block count, so a
+     * partition over 16777215 blocks cannot be expressed here; clamp rather
+     * than wrap, as TD_GETGEOMETRY clamps to ULONG_MAX. */
+    pt_u64 cyl = u->block_count;
+
+    if (cyl > 0xFFFFFFUL) {
+        cyl = 0xFFFFFFUL;
+    }
+    memset(p, 0, MS_PAGE_LEN);
+    p[0] = 0x04;
+    p[1] = MS_PAGE_LEN - 2;
+    p[2] = (UBYTE)((cyl >> 16) & 0xFF);
+    p[3] = (UBYTE)((cyl >> 8) & 0xFF);
+    p[4] = (UBYTE)(cyl & 0xFF);
+    p[5] = 1;                                   /* heads */
+    return p + MS_PAGE_LEN;
+}
+
+static LONG scsi_mode_sense(struct PUUnit *pu, struct SCSICmd *cmd,
+                            const UBYTE *cdb)
+{
+    UBYTE *d    = (UBYTE *)cmd->scsi_Data;
+    UBYTE  page = (UBYTE)(cdb[2] & 0x3F);
+    UBYTE  sub  = cdb[3];
+    int    dbd  = (cdb[1] & 0x08) ? 1 : 0;
+    UBYTE *p;
+    ULONG  need;
+
+    if (d == NULL) {
+        return IOERR_BADADDRESS;
+    }
+    if (sub != 0) {
+        return IOERR_NOCMD;         /* no subpages */
+    }
+    if (page != 0x03 && page != 0x04 && page != 0x3F) {
+        return IOERR_NOCMD;
+    }
+
+    need = 4 + (dbd ? 0 : 8)
+             + (page == 0x3F ? MS_PAGE_LEN * 2 : MS_PAGE_LEN);
+    if (cmd->scsi_Length < need) {
+        return IOERR_BADLENGTH;
+    }
+
+    memset(d, 0, need);
+    d[0] = (UBYTE)(need - 1);       /* mode data length */
+    d[1] = 0;                       /* medium type */
+    d[2] = (UBYTE)(pu->pu_Map.writable ? 0x00 : 0x80);
+    d[3] = (UBYTE)(dbd ? 0 : 8);    /* block descriptor length */
+
+    p = d + 4;
+    if (!dbd) {
+        pt_u64 blocks = pu->pu_Map.block_count;
+        ULONG  bs     = pu->pu_Map.block_size;
+
+        if (blocks > 0xFFFFFFUL) {
+            blocks = 0xFFFFFFUL;    /* 3-byte field */
+        }
+        p[0] = 0;                               /* density code */
+        p[1] = (UBYTE)((blocks >> 16) & 0xFF);
+        p[2] = (UBYTE)((blocks >> 8) & 0xFF);
+        p[3] = (UBYTE)(blocks & 0xFF);
+        p[4] = 0;
+        p[5] = (UBYTE)((bs >> 16) & 0xFF);
+        p[6] = (UBYTE)((bs >> 8) & 0xFF);
+        p[7] = (UBYTE)(bs & 0xFF);
+        p += 8;
+    }
+
+    if (page == 0x03 || page == 0x3F) {
+        p = mode_page_03(p, &pu->pu_Map);
+    }
+    if (page == 0x04 || page == 0x3F) {
+        p = mode_page_04(p, &pu->pu_Map);
+    }
+
+    cmd->scsi_Actual = need;
+    return 0;
+}
+
+/*
  * HD_SCSICMD policy: non-addressing commands are forwarded untouched,
  * READ/WRITE have their LBA rewritten and bounds-checked, READ CAPACITY is
  * synthesised for the partition, and everything else is refused. The
@@ -240,16 +396,33 @@ static LONG do_scsicmd(struct PUDisk *pd, struct PUUnit *pu,
 
     switch (op) {
     case SCSI_TEST_UNIT_READY:
-    case SCSI_INQUIRY:
-    case SCSI_MODE_SENSE_6:
         /*
-         * Forwarded untouched: they carry no address. MODE SENSE in
-         * particular is not optional - devtest -g ends by calling
-         * scsi_read_mode_pages() and returns its result unchanged, so
-         * refusing it makes "devtest -g" exit nonzero even when every
-         * printed line is correct.
+         * The one command genuinely answered by the child: "is the medium
+         * there and ready" is a property of the drive, and forwarding it is
+         * how a unit learns its media went away. No identity or geometry
+         * leaks through it.
          */
         break;
+
+    case SCSI_INQUIRY:
+        cmd->scsi_CmdActual = cmd->scsi_CmdLength;
+        err = scsi_inquiry(pd, pu, cmd, cdb);
+        cmd->scsi_Status = err == 0 ? 0 : 2;
+        return err == 0 ? 0 : HFERR_BadStatus;
+
+    case SCSI_MODE_SENSE_6:
+        /*
+         * Synthesised, not forwarded. MODE SENSE is not optional - devtest
+         * -g ends by calling scsi_read_mode_pages() and returns its result
+         * unchanged, so refusing it makes "devtest -g" exit nonzero even
+         * when every printed line is correct - but answering it with the
+         * child's geometry pages is worse than refusing, because the caller
+         * believes them.
+         */
+        cmd->scsi_CmdActual = cmd->scsi_CmdLength;
+        err = scsi_mode_sense(pu, cmd, cdb);
+        cmd->scsi_Status = err == 0 ? 0 : 2;
+        return err == 0 ? 0 : HFERR_BadStatus;
 
     case SCSI_READ_CAPACITY_10:
         cmd->scsi_CmdActual = cmd->scsi_CmdLength;

@@ -432,6 +432,21 @@ release, since he may be planning a device layer himself.
   substituted) are forwarded; `READ`/`WRITE (6/10/12/16)` have their LBA
   rewritten by the partition offset and bounds-checked; everything else is
   rejected. Bounds enforcement must not have a SCSI-direct back door.
+  - **Correction from the first on-target run: "non-addressing commands are
+    forwarded" was too broad.** `INQUIRY` and `MODE SENSE` carry no address
+    but they do carry *identity and geometry*, and forwarding them made a
+    unit describe the drive it lives on. devtest showed a partition reporting
+    the underlying drive's vendor string, and mode pages 0x03/0x04 reporting
+    the drive's sectors-per-track and cylinder/head counts - contradicting
+    `TD_GETGEOMETRY` for the same unit, which is worse than refusing them,
+    because a caller believes them.
+    **Only `TEST UNIT READY` is forwarded now.** "Is the medium there and
+    ready" really is the child's answer, and it is how a unit learns its
+    media went away. `INQUIRY`, `MODE SENSE` and `READ CAPACITY` are all
+    synthesised from the unit; a mode page we do not synthesise is refused
+    rather than forwarded, so nothing about the child can leak through.
+    The rule is therefore: **anything that describes the device is ours;
+    only live medium state comes from the child.**
   - **[P0] lide's accepted set is almost exactly this list**, arrived at
     independently: `0xA1`, `0x00`, `0x12`, `0x1A`, `0x25`, `0x9E`,
     `0x08`/`0x0A`, `0x28`/`0x2A`, `0x88`/`0x8A`, everything else
@@ -696,17 +711,15 @@ truth. Remaining loose ends:
 
 Both surfaced by running it; neither blocks Phase 1.
 
-1. **`MODE SENSE` geometry pages describe the child, not the partition.**
-   `devtest -g` reports Mode Page 0x03 with 32 sectors and Mode Page 0x04
-   with 32 cylinders / 16 heads — those are the *underlying* drive's pages,
-   because we forward `MODE SENSE` untouched as a "non-addressing" command.
-   But pages 0x03 (Format Parameters) and 0x04 (Rigid Drive Geometry) *are*
-   geometry, and a caller that trusts them gets the child's shape rather than
-   the unit's, contradicting everything `TD_GETGEOMETRY` says. lide
-   synthesises these pages rather than forwarding them.
-   **Phase 2: synthesise 0x03 and 0x04 from the partition, keep forwarding
-   the rest.** The proposal's "non-addressing commands are forwarded" rule
-   needs this exception written into it.
+1. **FIXED: `INQUIRY` and `MODE SENSE` described the child, not the unit.**
+   `devtest -g` reported Mode Page 0x03 with 32 sectors and Mode Page 0x04
+   with 32 cylinders / 16 heads — the underlying drive's pages — and
+   `INQUIRY` reported the drive's vendor and product. Both are now
+   synthesised from the unit, and both now agree with `TD_GETGEOMETRY`
+   (1 sector/track, 1024 cylinders, 1 head, 512-byte blocks on a
+   1024-block unit). See the amended `HD_SCSICMD` policy above; regression
+   checks live in `puttest`, including that an unsynthesised mode page is
+   refused rather than forwarded.
 
 2. **`devtest -g` reports 0 sectors for `READ_CAPACITY_10`, `_16` and
    "Read-to capacity"**, while a directly controlled request proves the
@@ -716,9 +729,14 @@ Both surfaced by running it; neither blocks Phase 1.
    field as `0xFFFFFFFF`. Notably "Read-to capacity" is TD-based and uses no
    SCSI at all, yet also shows 0 — so all three sharing one wrong value
    points at devtest's own size probe rather than at three separate bugs.
-   **Unexplained; needs a focused follow-up** (likely instrumenting
-   `do_seek_capacity`'s first probe). Recorded rather than hand-waved because
-   a capacity of zero is exactly the kind of thing a filesystem would act on.
+   **Traced to devtest's side of the boundary, with evidence.** Instrumenting
+   the device shows it is called with `blocks=1024, len=8`, writes
+   `addr=1023, bs=512` into devtest's own buffer, and reports
+   `scsi_Actual=8`. devtest then reads bytes 4-7 of that reply correctly
+   (512) but bytes 0-3 as `0xFFFFFFFF` — a value that does not appear in the
+   eight bytes written — so it is reading uninitialised memory outside the
+   reply. Nothing further to fix here; `-g` exits 0 regardless. Worth
+   reporting upstream alongside the other devtest findings.
 
 **Phase 1 (1 weekend):** parser (MBR/EBR/GPT, CRC, hybrid sniff) as a
 host-testable C module with the fixture set **including every hardening fixture

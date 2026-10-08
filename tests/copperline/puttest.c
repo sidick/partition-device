@@ -375,6 +375,97 @@ static void test_unit(ULONG unitnum, int part, ULONG expect_blocks)
         }
     }
 
+    /*
+     * --- HD_SCSICMD INQUIRY and MODE SENSE must describe THIS unit ---
+     *
+     * Both were originally forwarded to the child as "non-addressing"
+     * commands, and both then described the underlying drive: devtest showed
+     * a partition reporting the drive's vendor string, and mode pages 0x03
+     * and 0x04 reporting the drive's sectors-per-track and cylinder/head
+     * counts - flatly contradicting TD_GETGEOMETRY for the same unit. A
+     * caller that believes those pages computes addresses for the wrong
+     * disk, so this is checked here rather than left to inspection.
+     */
+    {
+        struct SCSICmd  sc;
+        UBYTE           cdb[10];
+        UBYTE           rep[64];
+        UBYTE           sense[32];
+
+        /* INQUIRY: our identity, not the child's. */
+        memset(&sc, 0, sizeof(sc));
+        memset(cdb, 0, sizeof(cdb));
+        memset(rep, 0xCC, sizeof(rep));
+        cdb[0] = 0x12;
+        cdb[4] = 36;
+        sc.scsi_Data        = (UWORD *)rep;
+        sc.scsi_Length      = 36;
+        sc.scsi_Command     = cdb;
+        sc.scsi_CmdLength   = 6;
+        sc.scsi_Flags       = SCSIF_READ | SCSIF_AUTOSENSE;
+        sc.scsi_SenseData   = sense;
+        sc.scsi_SenseLength = sizeof(sense);
+
+        err = do_cmd(HD_SCSICMD, 0, sizeof(struct SCSICmd), &sc);
+        check_eq("HD_SCSICMD INQUIRY", err, 0);
+        if (err == 0) {
+            check_eq("  peripheral type", (LONG)rep[0], 0);
+            if (memcmp(rep + 8, "PARTUNIT", 8) == 0) {
+                ok("  vendor is ours, not the child's");
+            } else {
+                fail("  vendor is ours, not the child's", 0, 1);
+            }
+        }
+
+        /* MODE SENSE page 0x04: geometry must match TD_GETGEOMETRY. */
+        memset(&sc, 0, sizeof(sc));
+        memset(cdb, 0, sizeof(cdb));
+        memset(rep, 0xCC, sizeof(rep));
+        cdb[0] = 0x1A;
+        cdb[1] = 0x08;          /* DBD: no block descriptor */
+        cdb[2] = 0x04;          /* Rigid Drive Geometry */
+        cdb[4] = sizeof(rep);
+        sc.scsi_Data        = (UWORD *)rep;
+        sc.scsi_Length      = sizeof(rep);
+        sc.scsi_Command     = cdb;
+        sc.scsi_CmdLength   = 6;
+        sc.scsi_Flags       = SCSIF_READ | SCSIF_AUTOSENSE;
+        sc.scsi_SenseData   = sense;
+        sc.scsi_SenseLength = sizeof(sense);
+
+        err = do_cmd(HD_SCSICMD, 0, sizeof(struct SCSICmd), &sc);
+        check_eq("HD_SCSICMD MODE SENSE 0x04", err, 0);
+        if (err == 0) {
+            ULONG cyl;
+            check_eq("  block desc len", (LONG)rep[3], 0);
+            check_eq("  page code", (LONG)(rep[4] & 0x3F), 0x04);
+            cyl = ((ULONG)rep[6] << 16) | ((ULONG)rep[7] << 8) |
+                   (ULONG)rep[8];
+            check_eq("  cylinders match geometry", (LONG)cyl,
+                     (LONG)expect_blocks);
+            check_eq("  heads match geometry", (LONG)rep[9], 1);
+        }
+
+        /* A page we do not synthesise must be refused, not forwarded -
+         * otherwise the child's answer leaks through this command. */
+        memset(&sc, 0, sizeof(sc));
+        memset(cdb, 0, sizeof(cdb));
+        cdb[0] = 0x1A;
+        cdb[1] = 0x08;
+        cdb[2] = 0x01;          /* Read-Write Error Recovery: not ours */
+        cdb[4] = sizeof(rep);
+        sc.scsi_Data        = (UWORD *)rep;
+        sc.scsi_Length      = sizeof(rep);
+        sc.scsi_Command     = cdb;
+        sc.scsi_CmdLength   = 6;
+        sc.scsi_Flags       = SCSIF_READ | SCSIF_AUTOSENSE;
+        sc.scsi_SenseData   = sense;
+        sc.scsi_SenseLength = sizeof(sense);
+
+        err = do_cmd(HD_SCSICMD, 0, sizeof(struct SCSICmd), &sc);
+        check_eq("unsynthesised mode page refused", err, HFERR_BadStatus);
+    }
+
     /* --- status commands report in io_Actual, never io_Error --- */
     err = do_cmd(TD_CHANGESTATE, 0, 0, NULL);
     check_eq("TD_CHANGESTATE ok", err, 0);
