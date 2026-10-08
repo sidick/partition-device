@@ -196,7 +196,12 @@ release, since he may be planning a device layer himself.
    is right. **They do not interoperate, and no single encoding satisfies
    both.** Emu68 is the authority to follow; `sgdisk` with the canonical string
    produces its encoding, so the fixture plan below is sound. **Accept both byte
-   orders on read, write only the spec encoding.** WinUAE's own ChangeLog
+   orders on read, write only the spec encoding.** Reading both is the whole
+   fix, since we never write partition tables — and it is safe rather than lax:
+   the WinUAE spelling is the byteswapped form of an Amiga-specific GUID, so it
+   cannot plausibly collide with another vendor's registered type and we are not
+   widening the match in a way that could claim a non-Amiga partition as a unit.
+   WinUAE's own ChangeLog
    writes the GUID in canonical order while its code literal does not, so this
    looks like a transcription slip worth reporting upstream. Amiberry, for its
    part, has **no GPT support whatsoever** — not the GUID, not `0x76`, no GPT
