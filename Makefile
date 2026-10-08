@@ -29,7 +29,7 @@ PT_TEST  = $(BUILD)/test_ptparse
 UM_TEST  = $(BUILD)/test_unitmap
 TESTBINS = $(PT_TEST) $(UM_TEST)
 
-.PHONY: all test asan strict cross check clean
+.PHONY: all test asan strict cross device check clean
 
 all: test
 
@@ -82,7 +82,26 @@ cross: | $(BUILD)
 	    $(WARN) -c -o $(BUILD)/unitmap_m68k.o src/unitmap.c
 	@$(M68KSIZE) $(BUILD)/ptparse_m68k.o $(BUILD)/unitmap_m68k.o
 
-check: test asan strict cross
+# The device itself. Linked -nostartfiles -nostdlib: a device has no startup
+# code, which is also why device.c must define and set SysBase by hand.
+DEVSRC = src/device.c src/config.c src/child.c src/unitio.c src/iotask.c \
+         src/ptparse.c src/unitmap.c
+DEVOBJ = $(DEVSRC:src/%.c=$(BUILD)/dev_%.o) $(BUILD)/endskip.o
+DEVCFLAGS = -mcpu=68000 -Os -fomit-frame-pointer -DPTPARSE_AMIGA $(WARN)
+
+$(BUILD)/dev_%.o: src/%.c $(HDRS) src/device.h | $(BUILD)
+	$(M68KCC) $(DEVCFLAGS) -c -o $@ $<
+
+$(BUILD)/endskip.o: src/endskip.S | $(BUILD)
+	$(M68KCC) -c -o $@ $<
+
+device: $(BUILD)/partunit.device
+
+$(BUILD)/partunit.device: $(DEVOBJ)
+	$(M68KCC) -nostartfiles -nostdlib -o $@ $(DEVOBJ) -lgcc -lc
+	@$(M68KSIZE) $@
+
+check: test asan strict cross device
 	@echo "all checks passed"
 
 clean:
