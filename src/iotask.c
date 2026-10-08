@@ -26,6 +26,13 @@
  * for something Exec may read at any time is a lie worth not telling. */
 static char task_name[] = DEVICE_NAME;
 
+#ifdef PU_DEBUG
+static ULONG dev_unit_count(struct PUDisk *pd)
+{
+    return pd->pd_Dev->db_NumUnits;
+}
+#endif
+
 /* Discover the partitions on this disk and populate its unit slots. */
 static void scan_disk(struct PUDisk *pd)
 {
@@ -132,18 +139,23 @@ void pu_io_task(void)
     ULONG          mask;
     int            running = 1;
 
+    DBG("PU: task entry\n");
     pd->pd_Port = CreateMsgPort();
     if (pd->pd_Port == NULL) {
         goto fail;
     }
+    DBG("PU: child_open\n");
     if (pu_child_open(pd) != 0) {
         goto fail;
     }
+    DBG("PU: child_probe\n");
     if (pu_child_probe(pd) != 0) {
         goto fail;
     }
 
+    DBG("PU: scan\n");
     scan_disk(pd);
+    DBGN("PU: units=", dev_unit_count(pd));
 
     pd->pd_Active = 1;
     Signal(pd->pd_Parent, SIGF_SINGLE);
@@ -251,7 +263,9 @@ LONG pu_disk_start(struct DeviceBase *dev, struct PUDisk *pd)
         return TDERR_NoMem;
     }
 
+    DBG("PU: waiting for task\n");
     Wait(SIGF_SINGLE);
+    DBG("PU: task reported\n");
 
     if (!pd->pd_Active) {
         /* The task freed nothing but itself; its stack and Task are ours. */

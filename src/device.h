@@ -154,4 +154,19 @@ LONG  pu_child_rw(struct PUDisk *pd, int is_write, pt_u64 byte_off,
                   ULONG length, APTR data, ULONG *actual, int needs64);
 int   pu_child_read_block(void *user, pt_u64 lba, void *buf);
 
+/*
+ * Serial breadcrumbs via exec RawPutChar, for bring-up under Copperline.
+ * Compiled out unless -DPU_DEBUG: a shipped device has no business writing
+ * to the debug port on every open.
+ */
+#ifdef PU_DEBUG
+void pu_dbg(const char *s);
+void pu_dbg_num(ULONG v);
+# define DBG(s)     pu_dbg(s)
+# define DBGN(s, v) do { pu_dbg(s); pu_dbg_num(v); pu_dbg("\n"); } while (0)
+#else
+# define DBG(s)     do { } while (0)
+# define DBGN(s, v) do { } while (0)
+#endif
+
 #endif /* PARTUNIT_DEVICE_H */

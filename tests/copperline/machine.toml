@@ -1,0 +1,33 @@
+# Headless Copperline machine for the partunit.device on-target test.
+#
+# The fixture disk is attached via [scsi], which gives the guest a real
+# scsi.device from the A2091's own boot ROM - which is precisely what
+# partunit.device wraps. An A2091 works on any machine model and does not
+# depend on the Kickstart IDE driver, so this config is not tied to a
+# Gayle machine.
+#
+# The fixture carries an MBR with a FAT decoy plus two Amiga partitions and
+# no RDB anywhere, so the OS itself mounts nothing from it. That is the
+# point: every unit the test sees exists because partunit.device created it.
+
+[cpu]
+model = "68000"              # the device is built -m68000; prove it runs there
+
+[memory]
+chip = "1M"
+fast = "4M"                  # the parser's scratch is ~4KB per disk
+
+[floppy]
+drives = 1
+speed = 0                    # turbo DMA: no realistic seek/rotation delay
+
+[floppy.df0]
+path = "boot.adf"            # built fresh by run.sh via xdftool
+write_protected = false
+
+[scsi]
+unit0 = "fixture.hdf"        # built fresh by run.sh via tools/mkfixture
+
+[emulation]
+power_on = true
+warp_speed = "max"

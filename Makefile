@@ -29,7 +29,7 @@ PT_TEST  = $(BUILD)/test_ptparse
 UM_TEST  = $(BUILD)/test_unitmap
 TESTBINS = $(PT_TEST) $(UM_TEST)
 
-.PHONY: all test asan strict cross device check clean
+.PHONY: all test asan strict cross device puttest mkfixture ontarget check clean
 
 all: test
 
@@ -112,6 +112,24 @@ device: $(BUILD)/partunit.device
 $(BUILD)/partunit.device: $(DEVOBJ)
 	$(M68KCC) -nostartfiles -nostdlib -m68000 -msoft-float -o $@ $(DEVOBJ) -lgcc -lc
 	@$(M68KSIZE) $@
+
+puttest: $(BUILD)/puttest
+
+mkfixture: $(BUILD)/mkfixture
+
+$(BUILD)/puttest: tests/copperline/puttest.c | $(BUILD)
+	$(M68KCC) -m68000 -msoft-float -O2 $(DEVWARN) -o $@ $<
+
+$(BUILD)/mkfixture: tools/mkfixture.c tests/fixture.c src/ptparse.c \
+                    tests/fixture.h $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/mkfixture.c tests/fixture.c src/ptparse.c
+
+# The on-target test: boots the real device under Copperline against a
+# fixture disk. This is the only check that exercises the device as an Exec
+# device rather than as arithmetic.
+ontarget: device puttest mkfixture
+	LAYOUT=mbr tests/copperline/run.sh
+	LAYOUT=gpt tests/copperline/run.sh
 
 check: test asan strict cross device
 	@echo "all checks passed"

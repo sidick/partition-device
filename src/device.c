@@ -301,7 +301,9 @@ static ULONG dev_open(struct DeviceBase *dev asm("a6"),
     /* Guard against being expunged during open. */
     dev->db_Lib.lib_OpenCnt++;
 
+    DBG("PU: open\n");
     ensure_configured(dev);
+    DBG("PU: configured\n");
 
     pu = find_unit(dev, unitnum);
     if (pu == NULL) {
@@ -654,3 +656,32 @@ static ULONG dev_abortio(struct DeviceBase *dev asm("a6"),
     Enable();
     return result;
 }
+
+#ifdef PU_DEBUG
+/* RawPutChar: char in d0, SysBase in a6, LVO -516. Same technique as the
+ * test harness, so bring-up output interleaves with the test's own. */
+static void dbg_putc(UBYTE c)
+{
+    register UBYTE d0 asm("d0") = c;
+    register APTR  a6 asm("a6") = (APTR)SysBase;
+    __asm volatile ("jsr -516(%%a6)" : : "r"(d0), "r"(a6)
+                    : "d1", "a0", "a1", "cc", "memory");
+}
+
+void pu_dbg(const char *s)
+{
+    while (*s != '\0') {
+        dbg_putc((UBYTE)*s++);
+    }
+}
+
+void pu_dbg_num(ULONG v)
+{
+    char buf[12];
+    int  i = 0;
+
+    if (v == 0) { dbg_putc('0'); return; }
+    while (v != 0 && i < 11) { buf[i++] = (char)('0' + (v % 10)); v /= 10; }
+    while (i-- > 0) { dbg_putc((UBYTE)buf[i]); }
+}
+#endif

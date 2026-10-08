@@ -22,14 +22,27 @@
 #include <exec/errors.h>
 #include <exec/memory.h>
 #include <dos/dos.h>
+#include <dos/dosextens.h>
 
 #include <proto/exec.h>
 #include <proto/dos.h>
 
 #include <string.h>
 
-/* Cast at the use site: Open() takes STRPTR (UBYTE *), not char *. */
-#define CONFIG_PATH ((STRPTR)"ENV:partunit/config")
+/*
+ * ENV: first, then S: - the same fallback sana2loop uses, and for the same
+ * two reasons. ENV: is where a configured system keeps this; S: is reachable
+ * in a minimal boot that has no ENV: assign and no C: commands to make one
+ * with, which is exactly the Copperline smoke-test environment.
+ *
+ * Cast at the use site: Open() takes STRPTR (UBYTE *), not char *.
+ */
+static const char *const config_paths[] = {
+    "ENV:partunit/config",
+    "S:partunit/config",
+    NULL
+};
+
 #define CONFIG_MAX  2048
 
 static int is_space(char c)
@@ -115,7 +128,9 @@ static void add_disk(struct DeviceBase *dev, const char *name, ULONG unit,
     pd->pd_DiskIndex = dev->db_NumDisks;
     pd->pd_Force     = (UBYTE)(force ? 1 : 0);
 
+    DBG("PU: disk_start\n");
     if (pu_disk_start(dev, pd) != 0) {
+        DBG("PU: disk_start failed\n");
         FreeMem(pd, sizeof(struct PUDisk));
         return;
     }
@@ -198,13 +213,47 @@ void pu_config_load(struct DeviceBase *dev)
     char *buf;
     LONG  got;
 
+    DBG("PU: config_load\n");
     DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 0);
     if (DOSBase == NULL) {
         return;
     }
     dev->db_DOSBase = (struct Library *)DOSBase;
 
-    fh = Open(CONFIG_PATH, MODE_OLDFILE);
+    /*
+     * First path that opens wins; a missing file is not an error, it just
+     * means no disks are configured and so no units appear.
+     *
+     * CRITICAL: pr_WindowPtr must be -1 across these Opens.
+     *
+     * Naming a volume that is not mounted - "ENV:" on a system with no ENV:
+     * assign, which is an ordinary configuration and not an exotic one -
+     * makes DOS put up a "Please insert volume ENV:" requester and wait for
+     * it. In a headless or Workbench-less boot there is nothing to display
+     * it on and nobody to click it, so the Open never returns and the
+     * caller's OpenDevice hangs forever. Setting pr_WindowPtr to -1 tells
+     * DOS to fail the call instead of asking, which is the only acceptable
+     * behaviour for a device: a missing config file must never be able to
+     * wedge the machine.
+     *
+     * Found exactly this way - the first on-target run hung here, which no
+     * host test could have shown.
+     */
+    {
+        struct Process *me = (struct Process *)SysBase->ThisTask;
+        APTR            saved = me->pr_WindowPtr;
+        int             i;
+
+        me->pr_WindowPtr = (APTR)-1;
+        fh = 0;
+        for (i = 0; config_paths[i] != NULL; i++) {
+            fh = Open((STRPTR)config_paths[i], MODE_OLDFILE);
+            if (fh != 0) {
+                break;
+            }
+        }
+        me->pr_WindowPtr = saved;
+    }
     if (fh == 0) {
         CloseLibrary((struct Library *)DOSBase);
         dev->db_DOSBase = NULL;

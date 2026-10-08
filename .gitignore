@@ -56,3 +56,5 @@ dkms.conf
 
 # Build output
 build/
+tests/copperline/boot.adf
+tests/copperline/fixture.hdf
