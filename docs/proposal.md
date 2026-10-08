@@ -475,6 +475,22 @@ release, since he may be planning a device layer himself.
   `Remove`/`ReplyMsg` inside a single `Disable()`.
 - **Never expunge [P0]** — *"If expunged the driver would be gone until
   reboot"*, and Expunge runs from the memory allocator so it may never `Wait()`.
+  Noted cost, from sana2loop: it *does* expunge properly, and found a real bug
+  where expunging froze only the device base and leaked every unit's buffers.
+  Refusing to expunge sidesteps that, but means `Avail FLUSH` can never reclaim
+  us. Worth revisiting if the device grows per-unit allocations worth
+  reclaiming.
+- **Known gap: `CMD_FLUSH`** — abort every queued request. Neither lide nor
+  `hostblk-rom` implements it and devtest does not test it, so it is not
+  urgent, but it is a standard device command and we currently return
+  `IOERR_NOCMD`. Phase 2.
+- **Config is read at first open, not at init [P0].** `init_device` runs in a
+  forbidden state and reading config means `Open()`, which can `Wait()` —
+  waiting inside a Forbid is a bug, and sana2loop's `init_device` carries
+  exactly that CAUTION. The read is additionally gated on the opener being a
+  real `NT_PROCESS`: a bare Task has no Process for DOS to work against, so it
+  sees no units at all. `Open` is single-threaded per Exec, so waiting there
+  for the disk-task handshake is legal.
 - **Trackdisk restrictions we inherit** (RKRM *Devices*, trackdisk p.306): all
   reads and writes must use an `io_Length` that is a whole multiple of the
   sector size, `io_Offset` must likewise be a multiple of it, and the data
