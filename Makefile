@@ -22,9 +22,12 @@ WARN     = -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual \
 CFLAGS  ?= -O1 -g $(WARN)
 
 BUILD    = build
-SRC      = src/ptparse.c
-TESTSRC  = tests/test_ptparse.c tests/fixture.c
-TESTBIN  = $(BUILD)/test_ptparse
+SRC      = src/ptparse.c src/unitmap.c
+HDRS     = src/ptparse.h src/unitmap.h
+
+PT_TEST  = $(BUILD)/test_ptparse
+UM_TEST  = $(BUILD)/test_unitmap
+TESTBINS = $(PT_TEST) $(UM_TEST)
 
 .PHONY: all test asan strict cross check clean
 
@@ -33,26 +36,40 @@ all: test
 $(BUILD):
 	@mkdir -p $(BUILD)
 
-$(TESTBIN): $(SRC) $(TESTSRC) src/ptparse.h tests/fixture.h | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(TESTSRC)
+$(PT_TEST): src/ptparse.c tests/test_ptparse.c tests/fixture.c \
+            $(HDRS) tests/fixture.h | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ src/ptparse.c tests/test_ptparse.c tests/fixture.c
 
-test: $(TESTBIN)
-	@$(TESTBIN)
+$(UM_TEST): src/unitmap.c tests/test_unitmap.c $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ src/unitmap.c tests/test_unitmap.c
+
+test: $(TESTBINS)
+	@$(PT_TEST)
+	@echo
+	@$(UM_TEST)
 
 # The parser handles untrusted on-disk data, so the malformed fixtures are
 # only meaningful under a sanitiser: "it didn't crash" is not evidence that a
 # bounds check works. Treat an asan failure as a real defect.
-asan: $(SRC) $(TESTSRC) | $(BUILD)
+asan: | $(BUILD)
 	$(CC) $(WARN) -O1 -g -fsanitize=address,undefined \
-	    -fno-omit-frame-pointer -o $(BUILD)/test_asan $(SRC) $(TESTSRC)
-	@$(BUILD)/test_asan
+	    -fno-omit-frame-pointer -o $(BUILD)/pt_asan \
+	    src/ptparse.c tests/test_ptparse.c tests/fixture.c
+	@$(BUILD)/pt_asan
+	$(CC) $(WARN) -O1 -g -fsanitize=address,undefined \
+	    -fno-omit-frame-pointer -o $(BUILD)/um_asan \
+	    src/unitmap.c tests/test_unitmap.c
+	@$(BUILD)/um_asan
 
 # The Amiga cross-compilers in use are older than the host compiler, so build
 # the parser alone as C89 to catch portability problems early. The tests
 # themselves are host-only and not held to this.
 strict: | $(BUILD)
-	$(CC) -std=c89 -pedantic $(WARN) -O1 -c -o $(BUILD)/ptparse_c89.o $(SRC)
-	@echo "parser compiles clean as C89"
+	$(CC) -std=c89 -pedantic $(WARN) -O1 -c \
+	    -o $(BUILD)/ptparse_c89.o src/ptparse.c
+	$(CC) -std=c89 -pedantic $(WARN) -O1 -c \
+	    -o $(BUILD)/unitmap_c89.o src/unitmap.c
+	@echo "parser and unitmap compile clean as C89"
 
 # Build the parser the way the device will: 68000, size-optimised, and with
 # PTPARSE_AMIGA so it uses exec/types.h rather than stdint.h. This is the only
@@ -60,8 +77,10 @@ strict: | $(BUILD)
 # would reveal an endianness assumption the host tests cannot see.
 cross: | $(BUILD)
 	$(M68KCC) -mcpu=68000 -Os -fomit-frame-pointer -DPTPARSE_AMIGA \
-	    $(WARN) -c -o $(BUILD)/ptparse_m68k.o $(SRC)
-	@$(M68KSIZE) $(BUILD)/ptparse_m68k.o
+	    $(WARN) -c -o $(BUILD)/ptparse_m68k.o src/ptparse.c
+	$(M68KCC) -mcpu=68000 -Os -fomit-frame-pointer -DPTPARSE_AMIGA \
+	    $(WARN) -c -o $(BUILD)/unitmap_m68k.o src/unitmap.c
+	@$(M68KSIZE) $(BUILD)/ptparse_m68k.o $(BUILD)/unitmap_m68k.o
 
 check: test asan strict cross
 	@echo "all checks passed"
