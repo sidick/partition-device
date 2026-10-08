@@ -23,15 +23,35 @@
 #include "unitmap.h"
 
 #define DEVICE_NAME     "partunit.device"
-#define DEVICE_VERSION  0
-#define DEVICE_REVISION 1
+#ifndef DEVICE_VERSION
+# define DEVICE_VERSION  0
+#endif
+#ifndef DEVICE_REVISION
+# define DEVICE_REVISION 1
+#endif
 /*
  * Disk-loaded only, so the RomTag priority is irrelevant to boot order; it
  * exists because a resident structure needs one.
  */
 #define DEVICE_PRIORITY 0
 
-#define IDSTRING        DEVICE_NAME " 0.1 (8.10.2026)"
+/*
+ * dd.mm.yyyy, not a month name: the AmigaDOS Version command parses this
+ * field as three decimal numbers, so a textual month never parses as a date.
+ */
+#define DEVICE_DATE     "(08.10.2026)"
+
+#define PU_STR(s)  #s
+#define PU_XSTR(s) PU_STR(s)
+
+/*
+ * Doubles as lib_IdString and as the standard AmigaDOS "$VER:" cookie that
+ * the Shell's Version command scans a loaded module's segments for. One
+ * string serving both is the idiomatic pattern; without the cookie, Version
+ * finds nothing for the device at all.
+ */
+#define IDSTRING        "$VER: partunit.device " PU_XSTR(DEVICE_VERSION) \
+                        "." PU_XSTR(DEVICE_REVISION) " " DEVICE_DATE
 
 /* Bounded by UM_MAX_DISKS / UM_MAX_PARTS_PER_DISK in unitmap.h. */
 #define MAX_DISKS       UM_MAX_DISKS
@@ -106,9 +126,10 @@ struct DeviceBase {
     struct SignalSemaphore db_UnitSem;
     ULONG               db_NumUnits;
     ULONG               db_NumDisks;
+    UBYTE               db_Configured;  /* config read + disks started */
     UBYTE               db_IsOpen;
     UBYTE               db_NoMount;
-    UBYTE               db_Pad[2];
+    UBYTE               db_Pad;
 };
 
 /* Our private commands, deliberately not advertised. */

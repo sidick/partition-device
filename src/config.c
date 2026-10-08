@@ -6,14 +6,15 @@
  * Phase 3 along with the mounter, and the parser here is shaped so they can
  * be added without restructuring.
  *
- * ENV: is read live at init; ENVARC: is never read directly, per the
- * house ENV/ENVARC rule.
+ * ENV: is read live; ENVARC: is never read directly, per the house
+ * ENV/ENVARC rule.
  *
- * Note on timing: this runs inside init_device, i.e. inside the caller's
- * OpenDevice, and it touches DOS. That is the same thing lide's mounter does
- * at init and it is fine for a disk-loaded device, but it is the reason a
- * ROM-resident form is out of scope - a ROM module has no DOS to read config
- * with and would need a global scan instead.
+ * Note on timing: this runs at FIRST OPEN, not at init, and only when the
+ * opener is a real Process - see ensure_configured() in device.c. init_device
+ * runs in a forbidden state, and Open() can Wait(), so reading config there
+ * would be waiting inside a Forbid. It is also the reason a ROM-resident form
+ * is out of scope: a ROM module has no DOS to read config with and would need
+ * a global scan instead.
  */
 
 #include "device.h"
@@ -27,7 +28,8 @@
 
 #include <string.h>
 
-#define CONFIG_PATH "ENV:partunit/config"
+/* Cast at the use site: Open() takes STRPTR (UBYTE *), not char *. */
+#define CONFIG_PATH ((STRPTR)"ENV:partunit/config")
 #define CONFIG_MAX  2048
 
 static int is_space(char c)
@@ -177,22 +179,34 @@ static void parse_config(struct DeviceBase *dev, char *text)
     }
 }
 
+/*
+ * A plain global that this toolchain's <proto/dos.h> inline stubs reference
+ * by this exact name. dos.library has no fixed low-memory pointer the way
+ * Exec does, so it must be OpenLibrary()'d first; <proto/dos.h> declares
+ * `extern struct DosLibrary *DOSBase`, and matching that exact type here is
+ * what actually supplies its storage.
+ *
+ * Opened, used and closed within this one function, every time - the device
+ * must not hold dos.library open, and a KS1.3 target has no business
+ * assuming it is even available.
+ */
+struct DosLibrary *DOSBase;
+
 void pu_config_load(struct DeviceBase *dev)
 {
-    struct Library *DOSBase;
-    BPTR            fh;
-    char           *buf;
-    LONG            got;
+    BPTR  fh;
+    char *buf;
+    LONG  got;
 
-    DOSBase = OpenLibrary("dos.library", 0);
+    DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 0);
     if (DOSBase == NULL) {
         return;
     }
-    dev->db_DOSBase = DOSBase;
+    dev->db_DOSBase = (struct Library *)DOSBase;
 
-    fh = Open((STRPTR)CONFIG_PATH, MODE_OLDFILE);
+    fh = Open(CONFIG_PATH, MODE_OLDFILE);
     if (fh == 0) {
-        CloseLibrary(DOSBase);
+        CloseLibrary((struct Library *)DOSBase);
         dev->db_DOSBase = NULL;
         return;
     }
@@ -200,7 +214,7 @@ void pu_config_load(struct DeviceBase *dev)
     buf = AllocMem(CONFIG_MAX + 1, MEMF_PUBLIC | MEMF_CLEAR);
     if (buf == NULL) {
         Close(fh);
-        CloseLibrary(DOSBase);
+        CloseLibrary((struct Library *)DOSBase);
         dev->db_DOSBase = NULL;
         return;
     }
@@ -213,6 +227,6 @@ void pu_config_load(struct DeviceBase *dev)
     }
 
     FreeMem(buf, CONFIG_MAX + 1);
-    CloseLibrary(DOSBase);
+    CloseLibrary((struct Library *)DOSBase);
     dev->db_DOSBase = NULL;
 }

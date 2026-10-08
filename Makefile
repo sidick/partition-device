@@ -76,10 +76,8 @@ strict: | $(BUILD)
 # build that exercises that path, and it is also where a big-endian target
 # would reveal an endianness assumption the host tests cannot see.
 cross: | $(BUILD)
-	$(M68KCC) -mcpu=68000 -Os -fomit-frame-pointer -DPTPARSE_AMIGA \
-	    $(WARN) -c -o $(BUILD)/ptparse_m68k.o src/ptparse.c
-	$(M68KCC) -mcpu=68000 -Os -fomit-frame-pointer -DPTPARSE_AMIGA \
-	    $(WARN) -c -o $(BUILD)/unitmap_m68k.o src/unitmap.c
+	$(M68KCC) $(DEVCFLAGS) $(WARN) -c -o $(BUILD)/ptparse_m68k.o src/ptparse.c
+	$(M68KCC) $(DEVCFLAGS) $(WARN) -c -o $(BUILD)/unitmap_m68k.o src/unitmap.c
 	@$(M68KSIZE) $(BUILD)/ptparse_m68k.o $(BUILD)/unitmap_m68k.o
 
 # The device itself. Linked -nostartfiles -nostdlib: a device has no startup
@@ -87,7 +85,21 @@ cross: | $(BUILD)
 DEVSRC = src/device.c src/config.c src/child.c src/unitio.c src/iotask.c \
          src/ptparse.c src/unitmap.c
 DEVOBJ = $(DEVSRC:src/%.c=$(BUILD)/dev_%.o) $(BUILD)/endskip.o
-DEVCFLAGS = -mcpu=68000 -Os -fomit-frame-pointer -DPTPARSE_AMIGA $(WARN)
+#
+# Flags follow sana2loop's device build, which is the house's known-good set:
+#
+#   -m68000 -msoft-float  plain 68000, and no FPU instructions or float
+#                         helpers - a device must not assume an FPU
+#   -Werror               a warning in device code is a defect
+#   -Wno-unused-parameter the register-annotated hooks take parameters Exec
+#                         requires and the body may not need
+#
+# Deliberately NOT the strict $(WARN) set used for the host builds:
+# -Wcast-qual and friends are valuable on the portable modules but fight the
+# Amiga headers, where lib_Node.ln_Name and friends are plain char *.
+DEVWARN   = -Wall -Wextra -Werror -Wno-unused-parameter
+DEVCFLAGS = -m68000 -msoft-float -Os -fomit-frame-pointer \
+            -DPTPARSE_AMIGA $(DEVWARN)
 
 $(BUILD)/dev_%.o: src/%.c $(HDRS) src/device.h | $(BUILD)
 	$(M68KCC) $(DEVCFLAGS) -c -o $@ $<
@@ -98,7 +110,7 @@ $(BUILD)/endskip.o: src/endskip.S | $(BUILD)
 device: $(BUILD)/partunit.device
 
 $(BUILD)/partunit.device: $(DEVOBJ)
-	$(M68KCC) -nostartfiles -nostdlib -o $@ $(DEVOBJ) -lgcc -lc
+	$(M68KCC) -nostartfiles -nostdlib -m68000 -msoft-float -o $@ $(DEVOBJ) -lgcc -lc
 	@$(M68KSIZE) $@
 
 check: test asan strict cross device

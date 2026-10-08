@@ -35,8 +35,11 @@
  */
 struct ExecBase *SysBase;
 
-static const char device_name[] = DEVICE_NAME;
-static const char device_id[]   = IDSTRING;
+/* Not const: Exec stores these in lib_Node.ln_Name and lib_IdString, which
+ * are plain char *, and casting const away for something the system may read
+ * at any time is a lie worth not telling. */
+static char device_name[] = DEVICE_NAME;
+static char device_id[]   = IDSTRING;
 
 /* Forward declarations, all register-annotated as Exec requires. */
 static struct Library *init_device(struct ExecBase *sysbase asm("a6"),
@@ -59,6 +62,7 @@ static ULONG dev_abortio(struct DeviceBase *dev asm("a6"),
  * safely return an error if a user tries to execute the file), followed by a
  * Resident structure."
  */
+int _start(void);
 int __attribute__((no_reorder)) _start(void)
 {
     return -1;
@@ -92,8 +96,8 @@ static const struct Resident romtag __attribute__((used)) = {
     DEVICE_VERSION,
     NT_DEVICE,
     DEVICE_PRIORITY,
-    (char *)device_name,
-    (char *)device_id,
+    device_name,
+    device_id,
     /*
      * With RTF_AUTOINIT, rt_Init points at the init TABLE, not at a function:
      * exec reads {size, vectors, structure-init, init-function} from it and
@@ -216,7 +220,7 @@ static struct Library *init_device(struct ExecBase *sysbase asm("a6"),
     dev->db_SegList = seglist;
 
     dev->db_Lib.lib_Node.ln_Type = NT_DEVICE;
-    dev->db_Lib.lib_Node.ln_Name = (char *)device_name;
+    dev->db_Lib.lib_Node.ln_Name = device_name;
     dev->db_Lib.lib_Flags        = LIBF_SUMUSED | LIBF_CHANGED;
     dev->db_Lib.lib_Version      = DEVICE_VERSION;
     dev->db_Lib.lib_Revision     = DEVICE_REVISION;
@@ -229,14 +233,40 @@ static struct Library *init_device(struct ExecBase *sysbase asm("a6"),
     dev->db_NumDisks = 0;
 
     /*
-     * Phase 1 presents no units until a config exists; pu_config_load reads
-     * the DISK lines and starts a task per disk. Returning the library even
-     * with zero units is deliberate - a device that refuses to open is far
-     * harder to diagnose than one that opens and lists nothing.
+     * Config is deliberately NOT read here.
+     *
+     * init_device runs in a forbidden state (Exec guarantees it is
+     * single-threaded, but we are inside Forbid()), and reading the config
+     * means dos.library Open(), which can Wait(). Waiting inside a Forbid is
+     * a bug, so the config read and the disk-task startup happen at first
+     * open instead - see ensure_configured().
      */
-    pu_config_load(dev);
-
     return (struct Library *)dev;
+}
+
+/*
+ * Read the config and start the disk tasks, once, on the first open.
+ *
+ * Gated on the opener being a real Process, because reading config means
+ * touching dos.library and a bare Task has no Process structure for DOS to
+ * work against. A Task-only opener therefore sees no units at all, which is
+ * honest: we have no way to learn which disks to wrap.
+ *
+ * Open is guaranteed single-threaded by Exec, so no lock is needed around
+ * db_Configured, and Wait()ing here (which pu_disk_start does, for the task
+ * handshake) is legal where it would not have been at init.
+ */
+static void ensure_configured(struct DeviceBase *dev)
+{
+    if (dev->db_Configured) {
+        return;
+    }
+    dev->db_Configured = 1;
+
+    if (SysBase->ThisTask->tc_Node.ln_Type != NT_PROCESS) {
+        return;
+    }
+    pu_config_load(dev);
 }
 
 /* ------------------------------------------------------------------ *
@@ -256,6 +286,8 @@ static ULONG dev_open(struct DeviceBase *dev asm("a6"),
 
     /* Guard against being expunged during open. */
     dev->db_Lib.lib_OpenCnt++;
+
+    ensure_configured(dev);
 
     pu = find_unit(dev, unitnum);
     if (pu == NULL) {
