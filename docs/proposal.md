@@ -608,9 +608,25 @@ DOSDrivers entries for every unit, for the `NOMOUNT` audience), and
 GPT GUID byte order has been verified by execution against an `sgdisk` ground
 truth. Remaining loose ends:
 
-- Confirm the byte order against a *real* Emu68-formatted card — the analysis is
-  solid but the Windows half of it rests on an inference (no Windows host was
-  available), and one physical card settles it.
+- **Confirm the byte order end-to-end against WinUAE.** The analysis is solid
+  but the Windows half rests on an inference — specifically, how Windows
+  populates `Gpt.PartitionType` before WinUAE's `memcmp` sees it. An
+  end-to-end test replaces the whole chain of reasoning.
+  - **It needs a *physical* drive, not a virtual one.** WinUAE's GPT handling
+    is entirely in `od-win32/hardfile_win32.cpp` and works by asking Windows
+    for the layout (`IOCTL_DISK_GET_DRIVE_LAYOUT_EX`); there is **no GPT
+    parsing of HDF files anywhere in the tree**, and the Unix backend never
+    reads sector 0. A GPT inside an HDF is invisible to it and falls through to
+    the RDB sniff. So: a USB stick partitioned with
+    `sgdisk -t 1:3F82EEBC-87C9-4097-8165-89D6540557C0`, on a Windows host, or a
+    VM with raw disk passthrough. Check whether the harddrive picker offers a
+    `:GP#…` entry, and read `write_log`.
+  - **Pair it with a patched-constant run.** Change WinUAE's literal to
+    `{0x3F82EEBC, 0x87C9, 0x4097, …}` and retest the same stick. If it then
+    recognises the partition, that proves the byte order is the sole defect and
+    gives the upstream report a one-line fix with evidence attached.
+  - Host CPU endianness is not the variable — all Windows hosts are
+    little-endian — but the test settles it regardless.
 - Decide the `0x78` question (see above).
 - Confirm `RDB_LOCATION_LIMIT` is 16 in `brcm-emmc.device`; the macro lives in
   NDK headers that were not available, so Emu68's in-partition scan range is
