@@ -12,7 +12,7 @@ Emu68 + AROS ✅ · Aminet name check ✅ · lide.device ✅
 | Decision | Outcome |
 |---|---|
 | **Name** | **`partunit.device`** — partitions become units, which is exactly what it does. `partition.device` was verified free on Aminet but was dropped to avoid reading as the device member of the `partition.library` (AROS) / `partition.resource` (Pulchart) family, by a third author. |
-| **Relationship to `ptable.library`** | **Build on it** — consume it for parsing rather than shipping a second MBR/EBR/GPT parser. Open a conversation with the author before release. Pending a scope reassessment (below). |
+| **Relationship to `ptable.library`** | **Build independently — own the parser.** Reconsidered and reversed: `ptable.library` is three weeks old with one author and three packages, so whether it becomes the ecosystem's parsing layer is unknown. A disk-loaded filter device whose defining property is bounds enforcement should not have that guarantee resting on an external dependency that may not be maintained. Registering units in `partition.resource` stays a **later option if demand appears** — additive, soft runtime check, not in any phase. Still open a conversation with the author before release. |
 | **Unit numbering** | **Keep `unit = disk × 100 + partition`.** Accepted costs: `devtest -p` will not list disks past the first, and `open()` must return `TDERR_BadUnitNum` for *every* absent unit number so unit-walking scanners do not stop at the gaps (see the lide LUN rule). |
 
 Open, not yet decided: RDB sniff range (0-62 vs 0-15), whether to accept MBR type
