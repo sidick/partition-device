@@ -58,3 +58,4 @@ dkms.conf
 build/
 tests/copperline/boot.adf
 tests/copperline/fixture.hdf
+tests/copperline/boot-devtest.adf

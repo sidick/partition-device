@@ -692,6 +692,34 @@ truth. Remaining loose ends:
   Search the issue trackers first; no existing report was found, but the
   trackers could not be searched, so absence is not established.
 
+### Open findings from the first devtest run
+
+Both surfaced by running it; neither blocks Phase 1.
+
+1. **`MODE SENSE` geometry pages describe the child, not the partition.**
+   `devtest -g` reports Mode Page 0x03 with 32 sectors and Mode Page 0x04
+   with 32 cylinders / 16 heads — those are the *underlying* drive's pages,
+   because we forward `MODE SENSE` untouched as a "non-addressing" command.
+   But pages 0x03 (Format Parameters) and 0x04 (Rigid Drive Geometry) *are*
+   geometry, and a caller that trusts them gets the child's shape rather than
+   the unit's, contradicting everything `TD_GETGEOMETRY` says. lide
+   synthesises these pages rather than forwarding them.
+   **Phase 2: synthesise 0x03 and 0x04 from the partition, keep forwarding
+   the rest.** The proposal's "non-addressing commands are forwarded" rule
+   needs this exception written into it.
+
+2. **`devtest -g` reports 0 sectors for `READ_CAPACITY_10`, `_16` and
+   "Read-to capacity"**, while a directly controlled request proves the
+   device returns the right answer: `puttest` reads back `last=1023 bs=512`
+   on a 1024-block unit and `last=511` on a 512-block one, with
+   `scsi_Actual=8`. devtest prints `last_sector + 1`, so it read the address
+   field as `0xFFFFFFFF`. Notably "Read-to capacity" is TD-based and uses no
+   SCSI at all, yet also shows 0 — so all three sharing one wrong value
+   points at devtest's own size probe rather than at three separate bugs.
+   **Unexplained; needs a focused follow-up** (likely instrumenting
+   `do_seek_capacity`'s first probe). Recorded rather than hand-waved because
+   a capacity of zero is exactly the kind of thing a filesystem would act on.
+
 **Phase 1 (1 weekend):** parser (MBR/EBR/GPT, CRC, hybrid sniff) as a
 host-testable C module with the fixture set **including every hardening fixture
 above**; device skeleton presenting units with offset translation, bounds,

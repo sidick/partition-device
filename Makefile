@@ -29,7 +29,8 @@ PT_TEST  = $(BUILD)/test_ptparse
 UM_TEST  = $(BUILD)/test_unitmap
 TESTBINS = $(PT_TEST) $(UM_TEST)
 
-.PHONY: all test asan strict cross device puttest mkfixture ontarget check clean
+.PHONY: all test asan strict cross device puttest mkfixture ontarget \
+        devtestrun devtest check clean
 
 all: test
 
@@ -130,6 +131,17 @@ $(BUILD)/mkfixture: tools/mkfixture.c tests/fixture.c src/ptparse.c \
 ontarget: device puttest mkfixture
 	LAYOUT=mbr tests/copperline/run.sh
 	LAYOUT=gpt tests/copperline/run.sh
+
+$(BUILD)/devtestrun: tests/copperline/devtestrun.c | $(BUILD)
+	$(M68KCC) -m68000 -msoft-float -O2 $(DEVWARN) -o $@ $< -lamiga
+
+devtestrun: $(BUILD)/devtestrun
+
+# Chris Hooper's devtest, against our units. Needs a cross-built devtest
+# binary at build/devtest - see tests/copperline/run-devtest.sh's header for
+# how to build one; it is third-party and not vendored here.
+devtest: device devtestrun mkfixture
+	@tests/copperline/run-devtest.sh
 
 check: test asan strict cross device
 	@echo "all checks passed"

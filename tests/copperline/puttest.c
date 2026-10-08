@@ -34,6 +34,8 @@
 
 #include <proto/exec.h>
 
+#include <string.h>
+
 /* ------------------------------------------------------------------ *
  * Serial output
  * ------------------------------------------------------------------ */
@@ -321,6 +323,55 @@ static void test_unit(ULONG unitnum, int part, ULONG expect_blocks)
                          (LONG)sizeof(struct NSDeviceQueryResult));
             }
             FreeMem(q, 256);
+        }
+    }
+
+    /*
+     * --- HD_SCSICMD READ CAPACITY(10) ---
+     *
+     * Must report the PARTITION's size, not the drive's. devtest's -g run
+     * showed this coming back as 0 sectors, and devtest -i then failed with
+     * "Invalid transfer size" - so this is checked directly here, where the
+     * expected numbers are known exactly.
+     */
+    {
+        struct SCSICmd  sc;
+        UBYTE           cdb[10];
+        UBYTE           cap[8];
+        UBYTE           sense[32];
+        ULONG           last;
+        ULONG           bs;
+
+        memset(&sc, 0, sizeof(sc));
+        memset(cdb, 0, sizeof(cdb));
+        memset(cap, 0xCC, sizeof(cap));     /* poison, so 0 means written */
+        cdb[0] = 0x25;                      /* READ CAPACITY(10) */
+
+        sc.scsi_Data        = (UWORD *)cap;
+        sc.scsi_Length      = sizeof(cap);
+        sc.scsi_Command     = cdb;
+        sc.scsi_CmdLength   = sizeof(cdb);
+        sc.scsi_Flags       = SCSIF_READ | SCSIF_AUTOSENSE;
+        sc.scsi_SenseData   = sense;
+        sc.scsi_SenseLength = sizeof(sense);
+
+        err = do_cmd(HD_SCSICMD, 0, sizeof(struct SCSICmd), &sc);
+        check_eq("HD_SCSICMD READ CAPACITY(10)", err, 0);
+        if (err == 0) {
+            last = ((ULONG)cap[0] << 24) | ((ULONG)cap[1] << 16) |
+                   ((ULONG)cap[2] << 8)  |  (ULONG)cap[3];
+            bs   = ((ULONG)cap[4] << 24) | ((ULONG)cap[5] << 16) |
+                   ((ULONG)cap[6] << 8)  |  (ULONG)cap[7];
+            puts_("    capacity last=");
+            put_u32(last);
+            puts_(" bs=");
+            put_u32(bs);
+            puts_(" scsi_Actual=");
+            put_u32(sc.scsi_Actual);
+            puts_("\n");
+            check_eq("  capacity last LBA", (LONG)last,
+                     (LONG)(expect_blocks - 1));
+            check_eq("  capacity block size", (LONG)bs, FIX_BS);
         }
     }
 
