@@ -181,15 +181,26 @@ release, since he may be planning a device layer himself.
    Emu68 is a ROM boot driver and must mount to be bootable, while we are
    disk-loaded and post-boot, so mounting RDB contents ourselves would duplicate
    an OS component for no gain.
-3. **Emu68 and WinUAE disagree on the GPT GUID byte order.** Emu68 writes the
-   spec-correct mixed-endian encoding (`LE32(0x3F82EEBC)` with explicit
-   byteswaps on m68k); WinUAE's constant matches the *flat byte array* spelling
-   instead. **They do not interoperate.** Emu68 is correct and is the authority
-   to follow; `sgdisk` with the canonical string produces Emu68's encoding, so
-   the fixture plan below is sound. **Accept both byte orders on read, write
-   only the spec encoding.** Worth reporting upstream to WinUAE. Amiberry, for
-   its part, has **no GPT support whatsoever** — not the GUID, not `0x76`, no
-   GPT code at all — so the convention is Emu68's alone, not ecosystem-wide.
+3. **Emu68 and WinUAE match different bytes for the GPT GUID, and only Emu68's
+   are spec-correct.** Verified by execution — each constant compiled verbatim
+   (Emu68's for big-endian m68k, run under `qemu-m68k`) and byte-dumped, against
+   an independent `sgdisk` ground truth:
+
+   | Source | 16 bytes |
+   |---|---|
+   | WinUAE | `3f 82 ee bc 87 c9 40 97 81 65 89 d6 54 05 57 c0` |
+   | Emu68 | `bc ee 82 3f c9 87 97 40 81 65 89 d6 54 05 57 c0` |
+   | `sgdisk`, canonical string | `bc ee 82 3f c9 87 97 40 81 65 89 d6 54 05 57 c0` |
+
+   UEFI 2.10 Appendix A requires the first three fields little-endian, so Emu68
+   is right. **They do not interoperate, and no single encoding satisfies
+   both.** Emu68 is the authority to follow; `sgdisk` with the canonical string
+   produces its encoding, so the fixture plan below is sound. **Accept both byte
+   orders on read, write only the spec encoding.** WinUAE's own ChangeLog
+   writes the GUID in canonical order while its code literal does not, so this
+   looks like a transcription slip worth reporting upstream. Amiberry, for its
+   part, has **no GPT support whatsoever** — not the GUID, not `0x76`, no GPT
+   code at all — so the convention is Emu68's alone, not ecosystem-wide.
 
 ## Architecture
 
@@ -254,6 +265,12 @@ release, since he may be planning a device layer himself.
   `0x76` **or `0x30`** **[P0]**, and GPT partitions of the Emu68 type GUID **in
   either byte order** **[P0]**. Nothing else — a FAT or Linux partition is never
   a unit, which is what protects the PC side of a shared card.
+  - **[P0]** `0x30`'s provenance is confirmed from WinUAE's ChangeLog:
+    *"accept also partition type 0x30 (another Amithlon like RDB drive inside
+    real PC partition)"*. **Open question:** the same ChangeLog elsewhere says
+    *"Amithlon partition type (0x78/0x30)"*, mentioning a `0x78` that appears
+    nowhere in current code. Check Amithlon documentation before deciding
+    whether to accept it as a third type; accepting all three on read is cheap.
 - **Hybrid MBR policy, stated explicitly [P0]**: if a valid GPT is present, use
   it and ignore the MBR entirely (the UEFI rule), logging that the MBR was
   ignored. Emu68 gets this wrong — a hybrid MBR makes its protective-MBR test
@@ -270,10 +287,18 @@ release, since he may be planning a device layer himself.
     cosmetic GUI sniff. A disk with an RDB at block 20 would be mounted by the
     OS but missed by a 16-block back-off, producing exactly the clash this
     exists to prevent.
-  - **[P0] Require the checksum, not just the magic.** Both emulators verify the
-    sum-to-zero longword checksum *and* that the stored block number matches.
-    A bare `memcmp("RDSK", …)` would false-positive and back off disks we should
-    be parsing.
+  - **[P0] Require the checksum, not just the magic.** Both emulators' *mounting*
+    paths verify the sum-to-zero longword checksum *and* that the stored block
+    number matches. A bare `memcmp("RDSK", …)` would false-positive and back off
+    disks we should be parsing. (WinUAE's real-drive *safety check* is laxer,
+    accepting magic alone — but the question we are answering is "will the OS
+    mount this?", and on a bad checksum it will not. Follow the mounting path.)
+    Apply the Win9x-trashed retry — zero bytes `0xDC..0xDF`, re-checksum —
+    before concluding "no RDB".
+  - **[P0] Clamp `rdb_SummedLongs` to the block size before summing.**
+    `brcm-emmc.device` uses it unchecked as a loop bound over a 512-byte buffer,
+    which is a straight over-read from malformed media. Our sniff runs on
+    untrusted media by definition.
   - **[P0] Recognise scrambled forms** for back-off purposes — byteswapped
     `DRKS` and ADIDE `CPRM` (`39 10 D3 12`) are RDBs the OS may well mount. But
     **never write**: WinUAE repairs Win9x-trashed RDBs in place, and repairing
@@ -579,11 +604,27 @@ DOSDrivers entries for every unit, for the `NOMOUNT` audience), and
 
 ## Phases
 
-**Phase 0 — complete.** Findings in [`phase0-notes.md`](phase0-notes.md).
-Remaining loose ends: verify the GPT GUID byte order against a real Emu68 card;
-check EAB for prior art (it is behind Anubis anti-bot and was not searchable);
-open a conversation with the `ptable.library` author; report the Emu68
-`emmc_Units[5]` overflow and the WinUAE GUID byte order upstream.
+**Phase 0 — complete.** Findings in [`phase0-notes.md`](phase0-notes.md). The
+GPT GUID byte order has been verified by execution against an `sgdisk` ground
+truth. Remaining loose ends:
+
+- Confirm the byte order against a *real* Emu68-formatted card — the analysis is
+  solid but the Windows half of it rests on an inference (no Windows host was
+  available), and one physical card settles it.
+- Decide the `0x78` question (see above).
+- Confirm `RDB_LOCATION_LIMIT` is 16 in `brcm-emmc.device`; the macro lives in
+  NDK headers that were not available, so Emu68's in-partition scan range is
+  assumed, not verified.
+- Check EAB for prior art — it is behind Anubis anti-bot and was not searchable;
+  needs a browser.
+- Open a conversation with the `ptable.library` author.
+- Report upstream: the WinUAE GUID byte order (its own ChangeLog writes the
+  canonical order, so this reads as a transcription slip), and the Emu68
+  `emmc_Units[5]` out-of-bounds write on a fifth Amiga-type GPT partition
+  — `&Units[5]` lands exactly on `emmc_UnitCount`, and the release notes
+  advertise *"No more 4-partition limit"* that the array does not support.
+  Search the issue trackers first; no existing report was found, but the
+  trackers could not be searched, so absence is not established.
 
 **Phase 1 (1 weekend):** parser (MBR/EBR/GPT, CRC, hybrid sniff) as a
 host-testable C module with the fixture set **including every hardening fixture

@@ -28,10 +28,118 @@ Open, not yet decided: RDB sniff range (0-62 vs 0-15), whether to accept MBR typ
 >    problem, solved a different way, by another author, right now. It needs a
 >    decision before any code is written. See
 >    [Overlapping prior art](#the-decision-ptablelibrary--partitionresource).
-> 2. **Emu68 and WinUAE disagree on the GPT type GUID's byte order**, so
->    WinUAE's Amiga-GPT support almost certainly does not work on
->    Emu68-prepared cards. The proposal treats the two as agreeing. See
->    [the GUID section](#-resolved-emu68-and-winuae-disagree-on-the-guid-byte-order).
+> 2. **Emu68 and WinUAE match different bytes for the GPT type GUID**, and only
+>    Emu68's matches what `sgdisk` writes — so no single encoding satisfies
+>    both. **Verified by execution**, not analysis; see
+>    [Empirical verification](#empirical-verification-of-the-guid-byte-order).
+
+## Empirical verification of the GUID byte order
+
+The reading-based conclusion below was confirmed by compiling each
+implementation's verbatim constant and dumping the bytes — Emu68's built for
+big-endian m68k and run under `qemu-m68k`, since an x86 build of the same code
+prints the swapped value and would have misled — plus an independent
+ground-truth check with `sgdisk`.
+
+| Source | 16 bytes |
+|---|---|
+| WinUAE | `3f 82 ee bc 87 c9 40 97 81 65 89 d6 54 05 57 c0` |
+| Emu68 (m68k under qemu) | `bc ee 82 3f c9 87 97 40 81 65 89 d6 54 05 57 c0` |
+| `sgdisk -t 1:3F82EEBC-87C9-4097-8165-89D6540557C0` (on disk) | `bc ee 82 3f c9 87 97 40 81 65 89 d6 54 05 57 c0` |
+
+**Emu68 and `sgdisk` agree; WinUAE does not.** UEFI 2.10 Appendix A: *"TimeLow,
+TimeMid, TimeHighAndVersion fields in the EFI are encoded as little endian"* —
+the first three fields, which is exactly what `bc ee 82 3f c9 87 97 40` shows.
+So **Emu68 is spec-correct**.
+
+Each implementation's own comparison was then fed all three blobs: Emu68's
+field-by-field test matched the `sgdisk` and Emu68 blobs and rejected WinUAE's;
+WinUAE's `memcmp` matched only its own. **No single type GUID satisfies both.**
+
+**The one inferred link**, stated honestly: no Windows host was available, so
+the claim that Windows hands `Gpt.PartitionType` to WinUAE already decoded
+(in-memory bytes == on-disk bytes) rests on inference. Two things support it: a
+control run with the EFI System Partition GUID
+(`sgdisk -t 1:C12A7328-F81F-11D2-BA4B-00A0C93EC93B` wrote
+`28 73 2a c1 1f f8 d2 11 …`), and mingw's `diskguid.h:13` defining that same
+GUID with `Data1 = 0xC12A7328` — i.e. in canonical text order. By that
+convention WinUAE's literal should have read `{0x3F82EEBC, 0x87C9, 0x4097, …}`,
+which compiled under mingw yields `bc ee 82 3f …`, matching `sgdisk`.
+
+Supporting evidence that WinUAE's literal is a transcription slip rather than a
+deliberate choice: its own ChangeLog
+(`od-win32/winuaechangelog.txt:1024`) writes the GUID as
+`{3F82EEBC-87C9-4097-8165-89D6540557C0}` — canonical text order — while the
+code literal is not that order. The line has not changed since commit
+`7e28559e` (2025-01-04), per `git log -L47,47`.
+
+**No existing report of the mismatch was found**, but absence is *not*
+established: the Emu68 and brcm-emmc.device issue trackers could not be
+searched (blocked endpoints), and EAB and WinUAE's tracker were only touched by
+a single web search. Worth checking before filing.
+
+> **Consequences for us, unchanged but now on firm ground:** accept both byte
+> orders on read; write only the spec encoding; `sgdisk` with the canonical
+> string produces the right bytes, so the fixture plan is sound as written; and
+> the success criterion claiming parity with WinUAE is dropped, because it
+> cannot be satisfied simultaneously with Emu68 parity.
+
+### Secondary findings from the same run
+
+**`0x30`'s provenance — and a possible third type.** WinUAE's ChangeLog
+(`winuaechangelog.txt:12956-12957`) explains it: *"accept also partition type
+0x30 (another Amithlon like RDB drive inside real PC partition)"*. Confirms the
+Amithlon attribution. But `winuaechangelog.txt:6046` calls it *"Amithlon
+partition type (0x78/0x30)"* — mentioning **`0x78`**, which appears nowhere in
+the current code (`hardfile_win32.cpp:3306-3311` tests only `0x76` and `0x30`).
+
+> **Open question.** Is `0x78` a historical Amithlon type that was dropped, a
+> typo for `0x76`, or a third type still in the wild? Cheap to accept all three
+> on read; worth one check of Amithlon documentation before deciding. Logged as
+> an open item rather than guessed at.
+
+**WinUAE's two RDB sniffs disagree on the checksum.** The mounting path
+(`filesys.cpp:8745`, loop at `:8771`) scans blocks 0-62 and requires magic
+**plus** a sum-to-zero checksum (`rdb_checksum`, `:8196-8216`), with the
+Win9x-trashed fix-up at `:8785-8796`. But the real-drive safety check
+(`hardfile_win32.cpp:359`) scans the same 63 blocks and accepts on **magic
+alone** (`"RDSK"` or `"DRKS"`, `:397`), no checksum.
+
+> **Our back-off should follow the mounting path and require the checksum**,
+> because the question we are answering is "will the OS mount this?" — and it
+> won't, on a bad checksum. Apply the Win9x retry (zero bytes `0xDC..0xDF`,
+> re-checksum) before concluding "no RDB", but never write the repair back.
+
+**`rdb_SummedLongs` is used unchecked as a loop bound** over a 512-byte buffer
+in `brcm-emmc.device` — a straightforward over-read from a malformed RDB.
+
+> **Adds a hardening requirement for us:** our own RDB sniff must clamp
+> `rdb_SummedLongs` to the block size before summing. Both WinUAE and Emu68
+> get this wrong or only partly right, and our sniff runs on untrusted media by
+> definition.
+
+**`emmc_Units[5]` overflow confirmed concretely.** `emmc.h:46` sizes the array
+for unit 0 plus four `0x76` MBR partitions; `partitions.c:230` appends
+unconditionally while looping over up to `gpt_PartCount` entries. An m68k mirror
+of the struct puts `&Units[5]` at offset 20, which is exactly `emmc_UnitCount`
+(2 bytes), with the following 2 bytes being the first half of
+`emmc_Lock.ss_Link.ln_Succ` (offset 22).
+
+Being undefined behaviour, the effect is compiler-dependent — at `-O0` the
+pointer's halves landed in the count and the semaphore link; at `-O2`/`-Os` the
+count simply became 6 and the semaphore was untouched. Either way, if the count
+reaches 6 the task-creation loop (`init.c:457`, `:494`) then dereferences a
+garbage `emmc_Units[5]`. Tested with gcc 13 rather than the Amiga toolchain and
+not on real hardware, so the precise corruption is indicative, not definitive —
+but the out-of-bounds write itself is certain.
+
+> Still worth reporting upstream, with the caveat that the release notes
+> advertise *"No more 4-partition limit"* while the array does not support it.
+
+**Unverified:** `RDB_LOCATION_LIMIT` in `brcm-emmc.device`
+(`unittask.c:260`, `:576`) is 16 per the comments, but the macro lives in the
+Amiga NDK headers, which were not available — so Emu68's in-partition RDB scan
+range is assumed-16, not confirmed-16.
 
 ---
 
