@@ -9,9 +9,14 @@
 #   make strict     same, with pedantic C89 warnings (the m68k toolchains are
 #                   older than the host compiler, so this catches portability
 #                   problems before they reach a cross build)
+#   make cross      compile the parser for m68k against the real Amiga types,
+#                   and report its size
+#   make check      all of the above
 #   make clean
 
-CC      ?= cc
+CC       ?= cc
+M68KCC   ?= /opt/amiga/bin/m68k-amigaos-gcc
+M68KSIZE ?= /opt/amiga/bin/m68k-amigaos-size
 WARN     = -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual \
            -Wstrict-prototypes -Wmissing-prototypes -Wwrite-strings
 CFLAGS  ?= -O1 -g $(WARN)
@@ -21,7 +26,7 @@ SRC      = src/ptparse.c
 TESTSRC  = tests/test_ptparse.c tests/fixture.c
 TESTBIN  = $(BUILD)/test_ptparse
 
-.PHONY: all test asan strict clean
+.PHONY: all test asan strict cross check clean
 
 all: test
 
@@ -48,6 +53,18 @@ asan: $(SRC) $(TESTSRC) | $(BUILD)
 strict: | $(BUILD)
 	$(CC) -std=c89 -pedantic $(WARN) -O1 -c -o $(BUILD)/ptparse_c89.o $(SRC)
 	@echo "parser compiles clean as C89"
+
+# Build the parser the way the device will: 68000, size-optimised, and with
+# PTPARSE_AMIGA so it uses exec/types.h rather than stdint.h. This is the only
+# build that exercises that path, and it is also where a big-endian target
+# would reveal an endianness assumption the host tests cannot see.
+cross: | $(BUILD)
+	$(M68KCC) -mcpu=68000 -Os -fomit-frame-pointer -DPTPARSE_AMIGA \
+	    $(WARN) -c -o $(BUILD)/ptparse_m68k.o $(SRC)
+	@$(M68KSIZE) $(BUILD)/ptparse_m68k.o
+
+check: test asan strict cross
+	@echo "all checks passed"
 
 clean:
 	rm -rf $(BUILD)

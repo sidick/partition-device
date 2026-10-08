@@ -370,13 +370,32 @@ release, since he may be planning a device layer himself.
   - Implement `ETD_READ`, `ETD_WRITE`, `ETD_FORMAT` and
     `NSCMD_ETD_READ64`/`WRITE64`/`FORMAT64`, each comparing `iotd_Count`
     against the unit's change number. (lide implements no seek command at all,
-    so `ETD_SEEK` is optional.)
-  - **The comparison is `iotd_Count < changeCount`, not `!=`** — a count ahead
-    of ours is accepted; only a stale one is rejected.
-  - **Initialise the change count to 1, not 0.** lide starts at 1, so
-    `iotd_Count == 0` is always rejected, on every unit including fixed ones.
-    Starting at 0 would make devtest's strictest test pass where lide's
-    fails — i.e. we would be wrong.
+    so `ETD_SEEK` is optional.) RKRM also defines `ETD_CLEAR`, `ETD_UPDATE`
+    and `ETD_MOTOR`; since we forward their plain counterparts anyway,
+    accepting the `ETD_` forms with the count check is nearly free and makes
+    us more complete than lide.
+  - **The comparison is `iotd_Count < changeCount`, not `!=`** — confirmed
+    against the canonical spec, RKRM *Devices* (trackdisk, pp.305-306):
+    *"These commands are performed only if the change count is less than or
+    equal to the value in the `iotd_Count` field"*, and *"Any request found
+    with an `iotd_Count` less than the current change counter value will be
+    returned with a characteristic error (TDERR_DiskChange)"*.
+  - **`iotd_Count == 0xFFFFFFFF` is a legitimate "don't care"** and must
+    succeed — same page: *"If the user wants enhanced disk I/O but does not
+    care about disk removal, then `iotd_Count` may be set to the maximum
+    unsigned long integer value (0xFFFFFFFF)."* The `<` comparison handles
+    this for free; a `!=` comparison would break it, which is the intuitive
+    mistake to avoid.
+  - **Initialise the change count to 1, not 0.** The spec says only that the
+    counter *"is incremented each time the disk is inserted or removed"* and
+    does not mandate a starting value — but devtest requires `iotd_Count = 0`
+    to be rejected, which is only true if the counter starts non-zero. lide
+    starts at 1. Starting at 0 would make devtest's strictest test pass where
+    lide's fails, i.e. we would be wrong. This is a devtest-driven convention
+    rather than a spec requirement, and worth a comment in the code saying so.
+  - `TDERR_DiskChanged` (29) is documented as *"Disk has been changed **or is
+    not currently present**"*, which is why the no-media check and the stale-
+    count check can share one error code.
   - The check must **precede** the media-presence and range checks, and must
     run in the IO task (arriving via `ReplyMsg`), not in `BeginIO`.
   - The change number is **ours, per unit**, derived from but not identical to
@@ -456,6 +475,16 @@ release, since he may be planning a device layer himself.
   `Remove`/`ReplyMsg` inside a single `Disable()`.
 - **Never expunge [P0]** — *"If expunged the driver would be gone until
   reboot"*, and Expunge runs from the memory allocator so it may never `Wait()`.
+- **Trackdisk restrictions we inherit** (RKRM *Devices*, trackdisk p.306): all
+  reads and writes must use an `io_Length` that is a whole multiple of the
+  sector size, `io_Offset` must likewise be a multiple of it, and the data
+  buffer must be word-aligned. Our `IOERR_BADLENGTH`/alignment handling above
+  is the same contract one layer up. (The pre-V36 Chip-RAM requirement does not
+  apply to us; we advertise `MEMF_PUBLIC` as lide does.)
+- **Honour `IOF_QUICK` on the immediate commands.** RKRM's own
+  `TD_CHANGENUM` and `TD_GETNUMTRACKS` examples set `io_Flags = IOF_QUICK` and
+  call `BeginIO` directly, reading the answer straight out of `io_Actual`
+  without a reply. Anything we answer in `BeginIO` must support that.
 
 ## Mounting (the normal-driver behaviour)
 
